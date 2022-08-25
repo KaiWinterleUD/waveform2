@@ -1,0 +1,121 @@
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
+from matplotlib.ticker import MultipleLocator
+
+plt.rcParams["font.family"] = "serif"
+plt.rcParams["mathtext.fontset"] = "dejavuserif"
+
+import numpy as np
+import sys
+import os
+
+ABS_PATH_HERE = str(os.path.dirname(os.path.realpath(__file__)))
+
+from icecube import WaveCalibrator, dataio, icetray, dataclasses, simclasses
+from icecube.icetray import I3Units
+from I3Tray import I3Tray
+
+tray = I3Tray()
+tray.Add("I3Reader", FilenameList=sys.argv[1:])
+# We are starting from IceTopRawData, so remove all P-frames for now
+def RemoveFrame(frame):
+    return False
+
+
+tray.Add(RemoveFrame, Streams=[icetray.I3Frame.Physics])
+# Remove all frames that do not have waveforms
+def RemoveSDST(frame):
+    return frame.Has("IceTopRawData")
+
+
+tray.Add(RemoveSDST, Streams=[icetray.I3Frame.DAQ])
+# Remove stuff we will create now new
+tray.Add(
+    "Delete",
+    Keys=["CalibratedIceTopATWD_HLC", "CalibratedIceTopFADC_HLC", "CalibratedIceTopATWD_SLC", "IceTopCalibratedWaveforms", "IceTopCalibratedWaveformRange", "IceTopErrata"],
+)
+tray.Add("I3WaveCalibrator", Launches="IceTopRawData", Waveforms="IceTopCalibratedWaveforms", Errata="IceTopErrata", WaveformRange="IceTopCalibratedWaveformRange")
+tray.Add(
+    "I3WaveformSplitter",
+    Force=True,
+    Input="IceTopCalibratedWaveforms",
+    PickUnsaturatedATWD=True,
+    HLC_ATWD="CalibratedIceTopATWD_HLC",
+    HLC_FADC="CalibratedIceTopFADC_HLC",
+    SLC="CalibratedIceTopFADC_SLC",
+)
+
+
+def PlotWaveforms(frame):
+    if not "CalibratedIceTopFADC_HLC" in frame:
+        return True
+    waveforms = frame["CalibratedIceTopFADC_HLC"]
+    for omkey in waveforms.keys():
+        wvfs = waveforms[omkey]
+
+        pes = frame["I3MCPESeriesMap"][omkey]
+        times_e = []
+        times_ph = []
+        times_mu = []
+        times_h = []
+        minTime = 1e100
+        for hit in pes:
+            if hit.ID.minorID == 3 or hit.ID.minorID == 5:
+                times_e += [hit.time / I3Units.ns] * hit.npe
+            if hit.ID.minorID == 2 or hit.ID.minorID == 7:
+                times_ph += [hit.time / I3Units.ns] * hit.npe
+            if hit.ID.minorID == 4:
+                times_mu += [hit.time / I3Units.ns] * hit.npe
+            if hit.ID.minorID == 9:
+                times_h += [hit.time / I3Units.ns] * hit.npe
+            minTime = min(minTime, hit.time)
+
+        for i, w in enumerate(wvfs):
+
+            gs = gridspec.GridSpec(2, 1, wspace=0.025, hspace=0.1, width_ratios=[1], height_ratios=[0.6, 0.4])
+            fig = plt.figure(figsize=(11 * 0.65, 6 * 0.65))
+            ax = fig.add_subplot(gs[0])
+
+            name = "Run{run:08d}_Event{event:08d}_Str{string:02d}_OM{om:02d}_{num:02d}".format(
+                run=frame["I3EventHeader"].run_id, event=frame["I3EventHeader"].event_id, string=omkey.string, om=omkey.om, num=i
+            )
+            x = np.linspace(w.time, w.time + len(w.waveform) * w.bin_width, len(w.waveform))
+            y = np.asarray(w.waveform) / icetray.I3Units.mV
+
+            minTimePulse = min(x[y > 0])
+
+            ax.plot(x, y)
+            ax.set_title(name)
+            ax.set_ylabel("Amplitude [mV]")
+            ax.set_ylim(0, max(y) * 1.05)
+            ax.set_xlim(min(x), max(x))
+            ax.set_xticklabels([])
+            ax.tick_params(axis="both", which="both", direction="in")
+            ax.yaxis.set_ticks_position("both")
+            ax.xaxis.set_ticks_position("both")
+
+            ax = fig.add_subplot(gs[1])
+            ax.set_xlim(min(x), max(x))
+            ax.tick_params(axis="both", which="both", direction="in")
+            ax.yaxis.set_ticks_position("both")
+            ax.xaxis.set_ticks_position("both")
+            ax.set_xlabel("Time [ns]")
+            ax.set_ylabel("#PE")
+            bins = np.linspace(min(x), max(x), int((max(x) - min(x)) / 2.0))
+            ax.hist(np.array(times_e), bins=bins, label=r"$e^{\pm}$")
+            ax.hist(np.array(times_ph), bins=bins, label=r"$\gamma$")
+            ax.hist(np.array(times_mu), bins=bins, label=r"$\mu^{\pm}$")
+            ax.hist(np.array(times_h), bins=bins, label=r"had.")
+
+            ax.legend(loc="best", prop={"size": 8.5})
+
+            print("./waveforms-plots/" + name + ".png")
+            fig.savefig(ABS_PATH_HERE + "/../plots/waveforms-plots/" + name + ".png")
+            plt.close()
+    return True
+
+
+tray.Add(PlotWaveforms, Streams=[icetray.I3Frame.DAQ])
+tray.Execute(5)
+tray.Finish()
